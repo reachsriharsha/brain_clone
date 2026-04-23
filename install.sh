@@ -421,34 +421,32 @@ fi
 
 header "QMD Collections"
 
-# Map collection directory names to QMD collection names
-declare -A COL_NAMES=(
-    ["notes"]="notes"
-    ["daily"]="daily"
-    ["sessions"]="sessions"
-    ["transcripts"]="transcripts"
-    ["skills"]="skills"
-    ["thoughts"]="thoughts"
-    ["people"]="people"
-    ["references"]="references"
-    ["weekly-reviews"]="weekly"
-)
+# Map collection directory names to QMD collection names.
+# Using functions instead of `declare -A` so this works on macOS's bash 3.2.
+col_name() {
+    case "$1" in
+        weekly-reviews) echo "weekly" ;;
+        *)              echo "$1" ;;
+    esac
+}
 
-declare -A COL_CONTEXTS=(
-    ["notes"]="Project notes, architecture decisions, research"
-    ["daily"]="Daily journal, standup, mood, energy, blockers"
-    ["sessions"]="Claude Code session exports, coding conversations"
-    ["transcripts"]="Meeting transcripts, voice memos, call notes"
-    ["skills"]="Claude Code skills and automation definitions"
-    ["thoughts"]="Quick captures: ideas, observations, tasks"
-    ["people"]="People profiles, relationship notes, contact context"
-    ["references"]="Bookmarks, articles, external resources"
-    ["weekly"]="Weekly reviews, goal tracking, reflections"
-)
+col_context() {
+    case "$1" in
+        notes)       echo "Project notes, architecture decisions, research" ;;
+        daily)       echo "Daily journal, standup, mood, energy, blockers" ;;
+        sessions)    echo "Claude Code session exports, coding conversations" ;;
+        transcripts) echo "Meeting transcripts, voice memos, call notes" ;;
+        skills)      echo "Claude Code skills and automation definitions" ;;
+        thoughts)    echo "Quick captures: ideas, observations, tasks" ;;
+        people)      echo "People profiles, relationship notes, contact context" ;;
+        references)  echo "Bookmarks, articles, external resources" ;;
+        weekly)      echo "Weekly reviews, goal tracking, reflections" ;;
+    esac
+}
 
 # Register collections
 for col in "${ALL_COLLECTIONS[@]}"; do
-    name="${COL_NAMES[$col]}"
+    name=$(col_name "$col")
     path="$VAULT_PATH/$col"
     info "Registering collection: $name -> $path"
     qmd collection add "$path" --name "$name" 2>/dev/null || true
@@ -458,8 +456,8 @@ echo ""
 
 # Add context descriptions
 for col in "${ALL_COLLECTIONS[@]}"; do
-    name="${COL_NAMES[$col]}"
-    ctx="${COL_CONTEXTS[$name]}"
+    name=$(col_name "$col")
+    ctx=$(col_context "$name")
     if [[ -n "$ctx" ]]; then
         info "Adding context for $name"
         qmd context add "qmd://$name" "$ctx" 2>/dev/null || true
