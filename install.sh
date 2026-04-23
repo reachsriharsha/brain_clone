@@ -97,6 +97,7 @@ EXISTING_ITEMS=()
 [[ -f "${SKILL_DIR:-$HOME/.claude/skills/recall}/SKILL.md" ]] && EXISTING_ITEMS+=("recall skill")
 [[ -f "${HOOKS_FILE:-$HOME/.claude/hooks.json}" ]] && EXISTING_ITEMS+=("hooks config")
 [[ -f "$HOME/.config/systemd/user/qmd-mcp.service" ]] && EXISTING_ITEMS+=("systemd service")
+[[ -f "$HOME/Library/LaunchAgents/com.qmd.mcp.plist" ]] && EXISTING_ITEMS+=("launchd agent")
 command -v qmd &>/dev/null && qmd collection list 2>/dev/null | grep -q "qmd://" && EXISTING_ITEMS+=("QMD collections")
 
 if [[ ${#EXISTING_ITEMS[@]} -gt 0 ]]; then
@@ -110,7 +111,11 @@ if [[ ${#EXISTING_ITEMS[@]} -gt 0 ]]; then
     echo -e "  ${YELLOW}•${NC} Sync script (${SYNC_SCRIPT_PATH:-~/.local/bin/sync-claude-sessions.sh})"
     echo -e "  ${YELLOW}•${NC} Recall skill (~/.claude/skills/recall/SKILL.md)"
     echo -e "  ${YELLOW}•${NC} Hooks config (~/.claude/hooks.json)"
-    echo -e "  ${YELLOW}•${NC} Systemd service (~/.config/systemd/user/qmd-mcp.service)"
+    if [[ "$PLATFORM" == "macos" ]]; then
+        echo -e "  ${YELLOW}•${NC} Launchd agent (~/Library/LaunchAgents/com.qmd.mcp.plist)"
+    else
+        echo -e "  ${YELLOW}•${NC} Systemd service (~/.config/systemd/user/qmd-mcp.service)"
+    fi
     echo -e "  ${YELLOW}•${NC} QMD collection registrations"
     echo ""
     info "Vault content (notes, daily logs, etc.) will NOT be touched."
@@ -218,9 +223,14 @@ fi
 
 if ! $NODE_OK; then
     info "Installing Node.js 22 LTS..."
-    if [[ "$PLATFORM" == "macos" ]] && command -v brew &>/dev/null; then
-        brew install node@22
-        export PATH="/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:$PATH"
+    if [[ "$PLATFORM" == "macos" ]]; then
+        if command -v brew &>/dev/null; then
+            brew install node@22
+            export PATH="/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:$PATH"
+        else
+            error "Homebrew not found. Install Homebrew first (https://brew.sh) or install Node.js >= ${NODE_MIN_VERSION:-22} manually: https://nodejs.org"
+            exit 1
+        fi
     else
         # Use NodeSource setup for Linux/WSL
         if command -v curl &>/dev/null; then
@@ -308,16 +318,21 @@ fi
 
 header "Vault Structure"
 
-# Create all collection directories
+# Create all collection directories (skip if already present)
 for col in "${ALL_COLLECTIONS[@]}"; do
     dir="$VAULT_PATH/$col"
-    mkdir -p "$dir"
-    success "Created $dir"
+    if [[ -d "$dir" ]]; then
+        warn "$dir already exists, skipping"
+    else
+        mkdir -p "$dir"
+        success "Created $dir"
+    fi
 done
 
-# Create template directories
-mkdir -p "$VAULT_PATH/daily/templates"
-mkdir -p "$VAULT_PATH/weekly-reviews/templates" 2>/dev/null || true
+# Create template directories (idempotent — only create if missing)
+for tmpl_dir in "$VAULT_PATH/daily/templates" "$VAULT_PATH/weekly-reviews/templates"; do
+    [[ -d "$tmpl_dir" ]] || mkdir -p "$tmpl_dir" 2>/dev/null || true
+done
 
 # Write daily template (non-destructive)
 DAILY_TEMPLATE="$VAULT_PATH/daily/templates/daily-template.md"
@@ -586,6 +601,22 @@ for env_path in "$SCRIPT_DIR/.env" "$HOME/.brain_clone.env"; do
     fi
 done
 
+# Portable helpers — macOS (BSD) and Linux (GNU) disagree on these commands.
+if command -v md5sum &>/dev/null; then
+    _hash_file() { md5sum "$1" | cut -d' ' -f1; }
+else
+    _hash_file() { md5 -q "$1"; }
+fi
+if stat -f '%m' / &>/dev/null 2>&1; then
+    _mtime_epoch() { stat -f '%m' "$1"; }
+    _epoch_fmt()   { date -r "$1" "+$2"; }
+    _sed_inplace() { sed -i '' "$@"; }
+else
+    _mtime_epoch() { stat -c '%Y' "$1"; }
+    _epoch_fmt()   { date -d "@$1" "+$2"; }
+    _sed_inplace() { sed -i "$@"; }
+fi
+
 SESSIONS_DIR="${CLAUDE_SESSIONS_DIR:-$HOME/.claude/projects}"
 VAULT_SESSIONS="${VAULT_PATH:-$HOME/vault}/sessions"
 HASH_LOG="$VAULT_SESSIONS/.sync-hashes"
@@ -600,7 +631,7 @@ while read -r session_file; do
     short_id="${session_id:0:8}"
 
     # Hash the JSONL to detect changes
-    current_hash=$(md5sum "$session_file" | cut -d' ' -f1)
+    current_hash=$(_hash_file "$session_file")
     stored_hash=$(grep "^${filename}:" "$HASH_LOG" 2>/dev/null | cut -d: -f2)
 
     # Skip if unchanged
@@ -627,8 +658,8 @@ with open(sys.argv[1], 'r') as f:
 
     # Fallback to mtime if no timestamp found
     if [[ -z "$first_ts" ]]; then
-        mod_epoch=$(stat -c '%Y' "$session_file" 2>/dev/null)
-        first_ts=$(date -d @"$mod_epoch" "+%Y-%m-%d-%H-%M" 2>/dev/null)
+        mod_epoch=$(_mtime_epoch "$session_file" 2>/dev/null)
+        first_ts=$(_epoch_fmt "$mod_epoch" "%Y-%m-%d-%H-%M" 2>/dev/null)
     fi
 
     output_file="$VAULT_SESSIONS/session-${first_ts}-${short_id}.md"
@@ -697,7 +728,7 @@ if messages:
     if [[ -s "$output_file" ]]; then
         # Update hash log (replace existing entry or append)
         if grep -q "^${filename}:" "$HASH_LOG" 2>/dev/null; then
-            sed -i "s|^${filename}:.*|${filename}:${current_hash}|" "$HASH_LOG"
+            _sed_inplace "s|^${filename}:.*|${filename}:${current_hash}|" "$HASH_LOG"
         else
             echo "${filename}:${current_hash}" >> "$HASH_LOG"
         fi
@@ -851,22 +882,87 @@ fi
 if $SETUP_MCP_HTTP; then
     header "MCP HTTP Daemon"
 
-    # Create systemd user service for auto-start
-    SYSTEMD_DIR="$HOME/.config/systemd/user"
-    SERVICE_FILE="$SYSTEMD_DIR/qmd-mcp.service"
-    mkdir -p "$SYSTEMD_DIR"
+    QMD_BIN="$(which qmd)"
 
-    if [[ -f "$SERVICE_FILE" ]] && ! $IS_REINSTALL; then
-        warn "Systemd service already exists, skipping"
+    if [[ "$PLATFORM" == "macos" ]]; then
+        # macOS: use launchd
+        LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+        PLIST_LABEL="com.qmd.mcp"
+        PLIST_FILE="$LAUNCHD_DIR/${PLIST_LABEL}.plist"
+        LOG_DIR="$HOME/.local/log"
+        mkdir -p "$LAUNCHD_DIR" "$LOG_DIR"
+
+        if [[ -f "$PLIST_FILE" ]] && ! $IS_REINSTALL; then
+            warn "Launchd agent already exists, skipping"
+        else
+            $IS_REINSTALL && [[ -f "$PLIST_FILE" ]] && info "Updating launchd agent..."
+            # Unload any previous version before rewriting
+            launchctl unload "$PLIST_FILE" 2>/dev/null || true
+            cat > "$PLIST_FILE" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${QMD_BIN}</string>
+        <string>mcp</string>
+        <string>--http</string>
+        <string>--port</string>
+        <string>${MCP_HTTP_PORT}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${HOME}/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/qmd-mcp.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/qmd-mcp.log</string>
+</dict>
+</plist>
+PLIST
+            success "Created launchd agent at $PLIST_FILE"
+        fi
+
+        if launchctl load "$PLIST_FILE" 2>/dev/null; then
+            sleep 1
+            if launchctl list 2>/dev/null | grep -q "${PLIST_LABEL}"; then
+                success "MCP HTTP daemon running on port $MCP_HTTP_PORT (launchd)"
+            else
+                warn "launchd load succeeded but service not listed; starting manually..."
+                qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
+                success "MCP HTTP daemon started on port $MCP_HTTP_PORT (manual mode)"
+            fi
+        else
+            warn "launchctl load failed, starting daemon directly..."
+            qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
+            success "MCP HTTP daemon started on port $MCP_HTTP_PORT (manual mode)"
+        fi
     else
-        $IS_REINSTALL && [[ -f "$SERVICE_FILE" ]] && info "Updating systemd service..."
-        cat > "$SERVICE_FILE" << UNIT
+        # Linux / WSL: use systemd user service
+        SYSTEMD_DIR="$HOME/.config/systemd/user"
+        SERVICE_FILE="$SYSTEMD_DIR/qmd-mcp.service"
+        mkdir -p "$SYSTEMD_DIR"
+
+        if [[ -f "$SERVICE_FILE" ]] && ! $IS_REINSTALL; then
+            warn "Systemd service already exists, skipping"
+        else
+            $IS_REINSTALL && [[ -f "$SERVICE_FILE" ]] && info "Updating systemd service..."
+            cat > "$SERVICE_FILE" << UNIT
 [Unit]
 Description=QMD MCP HTTP Server
 After=network.target
 
 [Service]
-ExecStart=$(which qmd) mcp --http --port ${MCP_HTTP_PORT}
+ExecStart=${QMD_BIN} mcp --http --port ${MCP_HTTP_PORT}
 Restart=on-failure
 RestartSec=5
 Environment=PATH=$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
@@ -874,26 +970,27 @@ Environment=PATH=$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
 [Install]
 WantedBy=default.target
 UNIT
-        success "Created systemd service at $SERVICE_FILE"
-    fi
-
-    # Enable and start the service
-    if systemctl --user daemon-reload 2>/dev/null; then
-        systemctl --user enable qmd-mcp.service 2>/dev/null
-        systemctl --user restart qmd-mcp.service 2>/dev/null
-        sleep 1
-        if systemctl --user is-active --quiet qmd-mcp.service 2>/dev/null; then
-            success "MCP HTTP daemon running on port $MCP_HTTP_PORT"
-        else
-            warn "systemd service failed to start, starting manually..."
-            qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
-            success "MCP HTTP daemon started on port $MCP_HTTP_PORT (manual mode)"
+            success "Created systemd service at $SERVICE_FILE"
         fi
-    else
-        # Fallback: no systemd (e.g. WSL without systemd)
-        info "systemd not available, starting daemon directly..."
-        qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
-        success "MCP HTTP daemon started on port $MCP_HTTP_PORT"
+
+        # Enable and start the service
+        if systemctl --user daemon-reload 2>/dev/null; then
+            systemctl --user enable qmd-mcp.service 2>/dev/null
+            systemctl --user restart qmd-mcp.service 2>/dev/null
+            sleep 1
+            if systemctl --user is-active --quiet qmd-mcp.service 2>/dev/null; then
+                success "MCP HTTP daemon running on port $MCP_HTTP_PORT"
+            else
+                warn "systemd service failed to start, starting manually..."
+                qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
+                success "MCP HTTP daemon started on port $MCP_HTTP_PORT (manual mode)"
+            fi
+        else
+            # Fallback: no systemd (e.g. WSL without systemd)
+            info "systemd not available, starting daemon directly..."
+            qmd mcp --http --port "$MCP_HTTP_PORT" --daemon 2>/dev/null
+            success "MCP HTTP daemon started on port $MCP_HTTP_PORT"
+        fi
     fi
 
     echo ""
@@ -939,5 +1036,9 @@ echo "  3. After adding content, re-index: qmd embed"
 $SETUP_RECALL && echo "  4. Try: /recall topic \"your search term\" in Claude Code"
 echo ""
 echo -e "${BOLD}Ensure ~/.bun/bin is in your PATH:${NC}"
-echo "  echo 'export PATH=\"\$HOME/.bun/bin:\$PATH\"' >> ~/.bashrc"
+if [[ "$PLATFORM" == "macos" ]]; then
+    echo "  echo 'export PATH=\"\$HOME/.bun/bin:\$PATH\"' >> ~/.zshrc"
+else
+    echo "  echo 'export PATH=\"\$HOME/.bun/bin:\$PATH\"' >> ~/.bashrc"
+fi
 echo ""

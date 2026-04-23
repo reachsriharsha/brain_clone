@@ -15,6 +15,22 @@ for env_path in "$SCRIPT_DIR/.env" "$SCRIPT_DIR/../brain_clone/.env" "$HOME/.bra
     fi
 done
 
+# Portable helpers — macOS (BSD) and Linux (GNU) disagree on these commands.
+if command -v md5sum &>/dev/null; then
+    _hash_file() { md5sum "$1" | cut -d' ' -f1; }
+else
+    _hash_file() { md5 -q "$1"; }
+fi
+if stat -f '%m' / &>/dev/null 2>&1; then
+    _mtime_epoch() { stat -f '%m' "$1"; }
+    _epoch_fmt()   { date -r "$1" "+$2"; }
+    _sed_inplace() { sed -i '' "$@"; }
+else
+    _mtime_epoch() { stat -c '%Y' "$1"; }
+    _epoch_fmt()   { date -d "@$1" "+$2"; }
+    _sed_inplace() { sed -i "$@"; }
+fi
+
 SESSIONS_DIR="${CLAUDE_SESSIONS_DIR:-$HOME/.claude/projects}"
 VAULT_SESSIONS="${VAULT_PATH:-$HOME/vault}/sessions"
 HASH_LOG="$VAULT_SESSIONS/.sync-hashes"
@@ -33,7 +49,7 @@ while read -r session_file; do
     short_id="${session_id:0:8}"
 
     # Hash the JSONL to detect changes
-    current_hash=$(md5sum "$session_file" | cut -d' ' -f1)
+    current_hash=$(_hash_file "$session_file")
     stored_hash=$(grep "^${filename}:" "$HASH_LOG" 2>/dev/null | cut -d: -f2)
 
     # Skip if unchanged
@@ -60,8 +76,8 @@ with open(sys.argv[1], 'r') as f:
 
     # Fallback to mtime if no timestamp found
     if [[ -z "$first_ts" ]]; then
-        mod_epoch=$(stat -c '%Y' "$session_file" 2>/dev/null)
-        first_ts=$(date -d @"$mod_epoch" "+%Y-%m-%d-%H-%M" 2>/dev/null)
+        mod_epoch=$(_mtime_epoch "$session_file" 2>/dev/null)
+        first_ts=$(_epoch_fmt "$mod_epoch" "%Y-%m-%d-%H-%M" 2>/dev/null)
     fi
 
     output_file="$VAULT_SESSIONS/session-${first_ts}-${short_id}.md"
@@ -130,7 +146,7 @@ if messages:
     if [[ -s "$output_file" ]]; then
         # Update hash log (replace existing entry or append)
         if grep -q "^${filename}:" "$HASH_LOG" 2>/dev/null; then
-            sed -i "s|^${filename}:.*|${filename}:${current_hash}|" "$HASH_LOG"
+            _sed_inplace "s|^${filename}:.*|${filename}:${current_hash}|" "$HASH_LOG"
             UPDATED=$((UPDATED + 1))
         else
             echo "${filename}:${current_hash}" >> "$HASH_LOG"
