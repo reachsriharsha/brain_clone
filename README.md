@@ -135,10 +135,16 @@ ls ~/your-vault/sessions/
 ```
 
 The sync script:
-- Converts JSONL session files to readable markdown
-- Uses hash-based change detection (re-syncs if session content grew)
-- Adds frontmatter with project, branch, and session ID
-- Skips subagent files
+- Converts session and subagent JSONL files to markdown, one note each
+- Includes messages (including queued ones), thinking, tool calls and results, saved full tool outputs, selected attachments and system messages
+- Labels text you did not type (injected context, compaction summaries, agent and task messages, API errors)
+- Adds frontmatter: title, directories, branches, version, models, token usage, cost and pull requests when recorded; subagent notes also link to their parent session
+- Uses hash-based change detection; after a format upgrade, all notes with source files are regenerated on the next run
+- Omits image data, queue operations and internal harness records (system prompts, API request logs)
+
+**Warning:** tool inputs and outputs can contain secrets such as API keys or `.env` contents. Nothing is redacted. Do not publish or sync the `sessions/` folder anywhere you would not put those secrets.
+
+To update an installed copy, re-run `./install.sh` and confirm the reinstall.
 
 ## MCP Server
 
