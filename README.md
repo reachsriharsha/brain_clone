@@ -124,10 +124,10 @@ qmd search "query" --files       # File paths only
 
 ## Session Sync
 
-Claude Code sessions are automatically synced to your vault on exit (via Stop hook).
+Sync is run manually; once a day is enough to pick up new and changed sessions. No Claude Code hook is installed.
 
 ```bash
-# Manual sync
+# Sync sessions
 ~/.local/bin/sync-claude-sessions.sh
 
 # Check what's been synced
@@ -135,10 +135,18 @@ ls ~/your-vault/sessions/
 ```
 
 The sync script:
-- Converts JSONL session files to readable markdown
-- Uses hash-based change detection (re-syncs if session content grew)
-- Adds frontmatter with project, branch, and session ID
-- Skips subagent files
+- Converts session and subagent JSONL files to markdown, one note each
+- Includes messages (including queued ones), thinking, tool calls and results, saved full tool outputs, selected attachments and system messages
+- Labels text you did not type (injected context, compaction summaries, agent and task messages, API errors)
+- Adds frontmatter: title, directories, branches, version, models, token usage, cost and pull requests when recorded; subagent notes also link to their parent session
+- Uses hash-based change detection; after a format upgrade, all notes with source files are regenerated on the next run
+- Omits image data, queue operations and internal harness records (system prompts, API request logs)
+
+Common secret formats are replaced with `[REDACTED]` in notes: private keys, prefixed provider tokens (OpenAI/Anthropic, GitHub, GitLab, AWS key IDs, Google, Slack, Stripe, npm, Hugging Face), JWTs, bearer and basic auth values, URL passwords, and values assigned to names like `password`, `token`, `secret` or `api_key`. The source JSONL files are not changed.
+
+**Warning:** redaction is pattern-based. It can miss secrets (for example, unlabelled random strings) and can occasionally hide harmless text. Do not publish or sync the `sessions/` folder anywhere you would not put secrets.
+
+To update an installed copy, re-run `./install.sh` and confirm the reinstall.
 
 ## MCP Server
 
@@ -182,6 +190,6 @@ your-vault/
 
 Running `./install.sh` again is safe. It will:
 - Detect the previous installation and warn you
-- Ask before overwriting generated files (sync script, skill, hooks, systemd service)
+- Ask before overwriting generated files (sync script, skill, systemd service or launchd agent)
 - Never touch your vault content (notes, daily logs, etc.)
 - Update configs to pick up new `.env` values  

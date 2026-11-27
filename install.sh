@@ -95,7 +95,6 @@ EXISTING_ITEMS=()
 # Check for signs of a previous installation
 [[ -f "${SYNC_SCRIPT_PATH:-$HOME/.local/bin/sync-claude-sessions.sh}" ]] && EXISTING_ITEMS+=("sync script")
 [[ -f "${SKILL_DIR:-$HOME/.claude/skills/recall}/SKILL.md" ]] && EXISTING_ITEMS+=("recall skill")
-[[ -f "${HOOKS_FILE:-$HOME/.claude/hooks.json}" ]] && EXISTING_ITEMS+=("hooks config")
 [[ -f "$HOME/.config/systemd/user/qmd-mcp.service" ]] && EXISTING_ITEMS+=("systemd service")
 [[ -f "$HOME/Library/LaunchAgents/com.qmd.mcp.plist" ]] && EXISTING_ITEMS+=("launchd agent")
 command -v qmd &>/dev/null && qmd collection list 2>/dev/null | grep -q "qmd://" && EXISTING_ITEMS+=("QMD collections")
@@ -110,7 +109,6 @@ if [[ ${#EXISTING_ITEMS[@]} -gt 0 ]]; then
     warn "Re-running will OVERWRITE the following generated files:"
     echo -e "  ${YELLOW}•${NC} Sync script (${SYNC_SCRIPT_PATH:-~/.local/bin/sync-claude-sessions.sh})"
     echo -e "  ${YELLOW}•${NC} Recall skill (~/.claude/skills/recall/SKILL.md)"
-    echo -e "  ${YELLOW}•${NC} Hooks config (~/.claude/hooks.json)"
     if [[ "$PLATFORM" == "macos" ]]; then
         echo -e "  ${YELLOW}•${NC} Launchd agent (~/Library/LaunchAgents/com.qmd.mcp.plist)"
     else
@@ -171,7 +169,7 @@ if ask_yn "Set up /recall Claude Code skill?"; then
     SETUP_RECALL=true
 fi
 
-if ask_yn "Set up session sync script + Claude Code hook?"; then
+if ask_yn "Set up session sync script?"; then
     SETUP_SYNC=true
 fi
 
@@ -571,7 +569,7 @@ SKILL
     fi
 fi
 
-# --- Section 8: Optional — Session sync + hooks -----------------------------
+# --- Section 8: Optional — Session sync -------------------------------------
 
 if $SETUP_SYNC; then
     header "Session Sync"
@@ -583,161 +581,7 @@ if $SETUP_SYNC; then
         warn "Sync script already exists, skipping"
     else
         $IS_REINSTALL && [[ -f "$SYNC_SCRIPT" ]] && info "Updating sync script..."
-        cat > "$SYNC_SCRIPT" << 'SYNC'
-#!/bin/bash
-# sync-claude-sessions.sh
-# Converts Claude Code JSONL sessions to clean markdown in your vault
-# Uses hash-based change detection: re-syncs sessions when JSONL content changes.
-
-# Load .env if present
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for env_path in "$SCRIPT_DIR/.env" "$HOME/.brain_clone.env"; do
-    if [[ -f "$env_path" ]]; then
-        # shellcheck disable=SC1090
-        source "$env_path"
-        break
-    fi
-done
-
-# Portable helpers — macOS (BSD) and Linux (GNU) disagree on these commands.
-if command -v md5sum &>/dev/null; then
-    _hash_file() { md5sum "$1" | cut -d' ' -f1; }
-else
-    _hash_file() { md5 -q "$1"; }
-fi
-if stat -f '%m' / &>/dev/null 2>&1; then
-    _mtime_epoch() { stat -f '%m' "$1"; }
-    _epoch_fmt()   { date -r "$1" "+$2"; }
-    _sed_inplace() { sed -i '' "$@"; }
-else
-    _mtime_epoch() { stat -c '%Y' "$1"; }
-    _epoch_fmt()   { date -d "@$1" "+$2"; }
-    _sed_inplace() { sed -i "$@"; }
-fi
-
-SESSIONS_DIR="${CLAUDE_SESSIONS_DIR:-$HOME/.claude/projects}"
-VAULT_SESSIONS="${VAULT_PATH:-$HOME/vault}/sessions"
-HASH_LOG="$VAULT_SESSIONS/.sync-hashes"
-
-mkdir -p "$VAULT_SESSIONS"
-touch "$HASH_LOG"
-
-# Find only top-level session JSONL files (skip subagents)
-while read -r session_file; do
-    filename=$(basename "$session_file")
-    session_id="${filename%.jsonl}"
-    short_id="${session_id:0:8}"
-
-    # Hash the JSONL to detect changes
-    current_hash=$(_hash_file "$session_file")
-    stored_hash=$(grep "^${filename}:" "$HASH_LOG" 2>/dev/null | cut -d: -f2)
-
-    # Skip if unchanged
-    if [[ "$current_hash" == "$stored_hash" ]]; then
-        continue
-    fi
-
-    # Find existing output file for this session (match by short_id)
-    existing_file=$(find "$VAULT_SESSIONS" -maxdepth 1 -name "session-*-${short_id}.md" -type f 2>/dev/null | head -1)
-
-    # Extract the first timestamp from the JSONL for a stable filename
-    first_ts=$(python3 -c "
-import json, sys
-with open(sys.argv[1], 'r') as f:
-    for line in f:
-        try:
-            entry = json.loads(line.strip())
-            ts = entry.get('timestamp', '')
-            if ts and entry.get('type') in ('user', 'assistant'):
-                print(ts[:16].replace('T', '-').replace(':', '-'))
-                break
-        except: continue
-" "$session_file" 2>/dev/null)
-
-    # Fallback to mtime if no timestamp found
-    if [[ -z "$first_ts" ]]; then
-        mod_epoch=$(_mtime_epoch "$session_file" 2>/dev/null)
-        first_ts=$(_epoch_fmt "$mod_epoch" "%Y-%m-%d-%H-%M" 2>/dev/null)
-    fi
-
-    output_file="$VAULT_SESSIONS/session-${first_ts}-${short_id}.md"
-
-    # If existing file has a different name, remove old one
-    if [[ -n "$existing_file" && "$existing_file" != "$output_file" ]]; then
-        rm -f "$existing_file"
-    fi
-
-    # Parse JSONL: extract user/assistant messages from Claude Code format
-    python3 -c "
-import json, sys
-
-messages = []
-session_info = {}
-with open(sys.argv[1], 'r') as f:
-    for line in f:
-        try:
-            entry = json.loads(line.strip())
-            entry_type = entry.get('type', '')
-
-            if entry_type not in ('user', 'assistant'):
-                continue
-
-            msg = entry.get('message', {})
-            role = msg.get('role', '')
-            content = msg.get('content', '')
-
-            if isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get('type') == 'text':
-                        text_parts.append(block.get('text', ''))
-                    elif isinstance(block, str):
-                        text_parts.append(block)
-                content = '\n'.join(text_parts)
-
-            if role in ('user', 'assistant') and isinstance(content, str) and content.strip():
-                ts = entry.get('timestamp', '')
-                header = f'## {role.title()}'
-                if ts:
-                    header += f' ({ts[:19]})'
-                messages.append(f'{header}\n\n{content.strip()}\n')
-
-            if not session_info and entry.get('cwd'):
-                session_info['cwd'] = entry.get('cwd', '')
-                session_info['branch'] = entry.get('gitBranch', '')
-                session_info['version'] = entry.get('version', '')
-
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            continue
-
-if messages:
-    print('---')
-    print('type: session')
-    if session_info.get('cwd'):
-        print(f\"project: {session_info['cwd']}\")
-    if session_info.get('branch'):
-        print(f\"branch: {session_info['branch']}\")
-    print(f'session_id: $session_id')
-    print('---')
-    print()
-    print('\n---\n'.join(messages))
-" "$session_file" > "$output_file" 2>/dev/null
-
-    if [[ -s "$output_file" ]]; then
-        # Update hash log (replace existing entry or append)
-        if grep -q "^${filename}:" "$HASH_LOG" 2>/dev/null; then
-            _sed_inplace "s|^${filename}:.*|${filename}:${current_hash}|" "$HASH_LOG"
-        else
-            echo "${filename}:${current_hash}" >> "$HASH_LOG"
-        fi
-    else
-        rm -f "$output_file"
-    fi
-done < <(find "$SESSIONS_DIR" -maxdepth 2 -name "*.jsonl" -type f 2>/dev/null)
-
-# Re-index QMD sessions collection
-qmd update 2>/dev/null || true
-SYNC
+        cp "$SCRIPT_DIR/sync-claude-sessions.sh" "$SYNC_SCRIPT"
         chmod +x "$SYNC_SCRIPT"
         success "Created sync script at $SYNC_SCRIPT"
     fi
@@ -755,59 +599,6 @@ VAULT_PATH="$VAULT_PATH"
 CLAUDE_SESSIONS_DIR="\$HOME/.claude/projects"
 ENVFILE
         success "Created $ENV_LINK"
-    fi
-
-    # Set up Claude Code hooks
-    HOOKS_FILE="${HOOKS_FILE:-$HOME/.claude/hooks.json}"
-    mkdir -p "$HOME/.claude"
-
-    if [[ -f "$HOOKS_FILE" ]]; then
-        # Check if our hook is already present
-        if grep -q "sync-claude-sessions" "$HOOKS_FILE" 2>/dev/null && ! $IS_REINSTALL; then
-            warn "Session sync hook already configured, skipping"
-        else
-            # Back up before modifying
-            cp "$HOOKS_FILE" "$HOOKS_FILE.bak.$(date +%s)"
-            warn "Backed up existing hooks.json"
-            # Merge our hook into existing config using python
-            python3 -c "
-import json, sys
-
-with open('$HOOKS_FILE', 'r') as f:
-    hooks = json.load(f)
-
-if 'hooks' not in hooks:
-    hooks['hooks'] = {}
-
-event = 'Stop'
-if event not in hooks['hooks']:
-    hooks['hooks'][event] = []
-
-hooks['hooks'][event].append({
-    'type': 'command',
-    'command': '$SYNC_SCRIPT'
-})
-
-with open('$HOOKS_FILE', 'w') as f:
-    json.dump(hooks, f, indent=2)
-    f.write('\n')
-" 2>/dev/null && success "Added session sync hook to existing hooks.json" \
-              || warn "Could not merge hooks — add manually"
-        fi
-    else
-        cat > "$HOOKS_FILE" << HOOKS
-{
-  "hooks": {
-    "Stop": [
-      {
-        "type": "command",
-        "command": "$SYNC_SCRIPT"
-      }
-    ]
-  }
-}
-HOOKS
-        success "Created hooks.json with session sync hook"
     fi
 fi
 
@@ -1016,7 +807,6 @@ success "Vault created at: $VAULT_PATH"
 success "Collections registered: ${ALL_COLLECTIONS[*]}"
 $SETUP_RECALL && success "Recall skill: $SKILL_DIR/SKILL.md"
 $SETUP_SYNC   && success "Session sync: $SYNC_SCRIPT"
-$SETUP_SYNC   && success "Hooks config: $HOOKS_FILE"
 $SETUP_MCP    && success "MCP stdio:  $CLAUDE_DESKTOP_CONFIG (server: $MCP_SERVER_NAME)"
 $SETUP_MCP_HTTP && success "MCP HTTP:   http://localhost:$MCP_HTTP_PORT (server: $MCP_SERVER_NAME)"
 
