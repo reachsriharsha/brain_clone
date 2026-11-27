@@ -95,7 +95,6 @@ EXISTING_ITEMS=()
 # Check for signs of a previous installation
 [[ -f "${SYNC_SCRIPT_PATH:-$HOME/.local/bin/sync-claude-sessions.sh}" ]] && EXISTING_ITEMS+=("sync script")
 [[ -f "${SKILL_DIR:-$HOME/.claude/skills/recall}/SKILL.md" ]] && EXISTING_ITEMS+=("recall skill")
-[[ -f "${HOOKS_FILE:-$HOME/.claude/hooks.json}" ]] && EXISTING_ITEMS+=("hooks config")
 [[ -f "$HOME/.config/systemd/user/qmd-mcp.service" ]] && EXISTING_ITEMS+=("systemd service")
 [[ -f "$HOME/Library/LaunchAgents/com.qmd.mcp.plist" ]] && EXISTING_ITEMS+=("launchd agent")
 command -v qmd &>/dev/null && qmd collection list 2>/dev/null | grep -q "qmd://" && EXISTING_ITEMS+=("QMD collections")
@@ -110,7 +109,6 @@ if [[ ${#EXISTING_ITEMS[@]} -gt 0 ]]; then
     warn "Re-running will OVERWRITE the following generated files:"
     echo -e "  ${YELLOW}•${NC} Sync script (${SYNC_SCRIPT_PATH:-~/.local/bin/sync-claude-sessions.sh})"
     echo -e "  ${YELLOW}•${NC} Recall skill (~/.claude/skills/recall/SKILL.md)"
-    echo -e "  ${YELLOW}•${NC} Hooks config (~/.claude/hooks.json)"
     if [[ "$PLATFORM" == "macos" ]]; then
         echo -e "  ${YELLOW}•${NC} Launchd agent (~/Library/LaunchAgents/com.qmd.mcp.plist)"
     else
@@ -171,7 +169,7 @@ if ask_yn "Set up /recall Claude Code skill?"; then
     SETUP_RECALL=true
 fi
 
-if ask_yn "Set up session sync script + Claude Code hook?"; then
+if ask_yn "Set up session sync script?"; then
     SETUP_SYNC=true
 fi
 
@@ -571,7 +569,7 @@ SKILL
     fi
 fi
 
-# --- Section 8: Optional — Session sync + hooks -----------------------------
+# --- Section 8: Optional — Session sync -------------------------------------
 
 if $SETUP_SYNC; then
     header "Session Sync"
@@ -601,59 +599,6 @@ VAULT_PATH="$VAULT_PATH"
 CLAUDE_SESSIONS_DIR="\$HOME/.claude/projects"
 ENVFILE
         success "Created $ENV_LINK"
-    fi
-
-    # Set up Claude Code hooks
-    HOOKS_FILE="${HOOKS_FILE:-$HOME/.claude/hooks.json}"
-    mkdir -p "$HOME/.claude"
-
-    if [[ -f "$HOOKS_FILE" ]]; then
-        # Check if our hook is already present
-        if grep -q "sync-claude-sessions" "$HOOKS_FILE" 2>/dev/null && ! $IS_REINSTALL; then
-            warn "Session sync hook already configured, skipping"
-        else
-            # Back up before modifying
-            cp "$HOOKS_FILE" "$HOOKS_FILE.bak.$(date +%s)"
-            warn "Backed up existing hooks.json"
-            # Merge our hook into existing config using python
-            python3 -c "
-import json, sys
-
-with open('$HOOKS_FILE', 'r') as f:
-    hooks = json.load(f)
-
-if 'hooks' not in hooks:
-    hooks['hooks'] = {}
-
-event = 'Stop'
-if event not in hooks['hooks']:
-    hooks['hooks'][event] = []
-
-hooks['hooks'][event].append({
-    'type': 'command',
-    'command': '$SYNC_SCRIPT'
-})
-
-with open('$HOOKS_FILE', 'w') as f:
-    json.dump(hooks, f, indent=2)
-    f.write('\n')
-" 2>/dev/null && success "Added session sync hook to existing hooks.json" \
-              || warn "Could not merge hooks — add manually"
-        fi
-    else
-        cat > "$HOOKS_FILE" << HOOKS
-{
-  "hooks": {
-    "Stop": [
-      {
-        "type": "command",
-        "command": "$SYNC_SCRIPT"
-      }
-    ]
-  }
-}
-HOOKS
-        success "Created hooks.json with session sync hook"
     fi
 fi
 
@@ -862,7 +807,6 @@ success "Vault created at: $VAULT_PATH"
 success "Collections registered: ${ALL_COLLECTIONS[*]}"
 $SETUP_RECALL && success "Recall skill: $SKILL_DIR/SKILL.md"
 $SETUP_SYNC   && success "Session sync: $SYNC_SCRIPT"
-$SETUP_SYNC   && success "Hooks config: $HOOKS_FILE"
 $SETUP_MCP    && success "MCP stdio:  $CLAUDE_DESKTOP_CONFIG (server: $MCP_SERVER_NAME)"
 $SETUP_MCP_HTTP && success "MCP HTTP:   http://localhost:$MCP_HTTP_PORT (server: $MCP_SERVER_NAME)"
 

@@ -124,10 +124,10 @@ qmd search "query" --files       # File paths only
 
 ## Session Sync
 
-Claude Code sessions are automatically synced to your vault on exit (via Stop hook).
+Sync is run manually; once a day is enough to pick up new and changed sessions. No Claude Code hook is installed.
 
 ```bash
-# Manual sync
+# Sync sessions
 ~/.local/bin/sync-claude-sessions.sh
 
 # Check what's been synced
@@ -190,6 +190,6 @@ your-vault/
 
 Running `./install.sh` again is safe. It will:
 - Detect the previous installation and warn you
-- Ask before overwriting generated files (sync script, skill, hooks, systemd service)
+- Ask before overwriting generated files (sync script, skill, systemd service or launchd agent)
 - Never touch your vault content (notes, daily logs, etc.)
 - Update configs to pick up new `.env` values  
