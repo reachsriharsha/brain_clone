@@ -142,7 +142,9 @@ The sync script:
 - Uses hash-based change detection; after a format upgrade, all notes with source files are regenerated on the next run
 - Omits image data, queue operations and internal harness records (system prompts, API request logs)
 
-**Warning:** tool inputs and outputs can contain secrets such as API keys or `.env` contents. Nothing is redacted. Do not publish or sync the `sessions/` folder anywhere you would not put those secrets.
+Common secret formats are replaced with `[REDACTED]` in notes: private keys, prefixed provider tokens (OpenAI/Anthropic, GitHub, GitLab, AWS key IDs, Google, Slack, Stripe, npm, Hugging Face), JWTs, bearer and basic auth values, URL passwords, and values assigned to names like `password`, `token`, `secret` or `api_key`. The source JSONL files are not changed.
+
+**Warning:** redaction is pattern-based. It can miss secrets (for example, unlabelled random strings) and can occasionally hide harmless text. Do not publish or sync the `sessions/` folder anywhere you would not put secrets.
 
 To update an installed copy, re-run `./install.sh` and confirm the reinstall.
 

@@ -5,8 +5,8 @@
 # Uses hash-based change detection: a note is rewritten only when its source
 # files change, or when FORMAT_VERSION below changes. Safe to run repeatedly.
 #
-# Notes include tool inputs and outputs, so they can contain secrets that
-# appeared in a session. Treat the sessions folder as sensitive.
+# Common secret formats are redacted from notes. Redaction is pattern-based and
+# can miss secrets, so still treat the sessions folder as sensitive.
 
 # Load .env from script directory or repo root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +27,7 @@ python3 - "$SESSIONS_DIR" "$VAULT_SESSIONS" <<'PY'
 import glob, hashlib, json, os, re, sys
 
 # Bump to force every note to be regenerated on the next run.
-FORMAT_VERSION = 'v2'
+FORMAT_VERSION = 'v3'
 
 # Attachment types that carry session content. Others are harness scaffolding
 # (system prompts, tool listings, reminders, account IDs) and are skipped.
@@ -37,6 +37,46 @@ ATTACHMENTS = {
     'task_status', 'hook_success', 'hook_non_blocking_error',
     'hook_additional_context', 'inlined_image_paths',
 }
+
+REDACTED = '[REDACTED]'
+
+# Names whose assigned value is treated as a secret. "tokens" (a count) is not.
+SECRET_NAME = (r'(?:password|passwd|pwd|secret|token(?!s)|api[_-]?key|access[_-]?key|'
+               r'secret[_-]?key|private[_-]?key|client[_-]?secret|credentials?)')
+
+SECRET_PATTERNS = [(re.compile(pattern, flags), repl) for pattern, flags, repl in [
+    # PEM private keys, including ones cut off before the END line.
+    (r'-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\Z)',
+     re.S, REDACTED),
+    # Provider tokens with recognisable prefixes.
+    (r'\b(?:sk-[A-Za-z0-9_-]{20,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|'
+     r'gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|glpat-[A-Za-z0-9_-]{20,}|'
+     r'(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|ya29\.[A-Za-z0-9_-]{20,}|'
+     r'xox[abposr]-[A-Za-z0-9-]{10,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,})', 0, REDACTED),
+    # JSON Web Tokens.
+    (r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}', 0, REDACTED),
+    # Authorization header values.
+    (r'\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}', re.I, r'\g<1>' + REDACTED),
+    (r'\b(Authorization\\*["\']?\s*[:=]\s*\\*["\']?Basic\s+)[A-Za-z0-9+/=]{8,}', re.I, r'\g<1>' + REDACTED),
+    # Passwords inside URLs: scheme://user:password@host
+    (r'(\b[a-z][a-z0-9+.-]*://[^\s/:@"\'\\]*:)[^\s/@"\'\\]+(?=@)', re.I, r'\g<1>' + REDACTED),
+    # Quoted values: API_KEY="x", "password": "x", also when JSON-escaped.
+    (r'(' + SECRET_NAME + r'[A-Za-z0-9_]*(?:\\*["\'])?\s*[:=]\s*(\\*["\']))(?!\[REDACTED)[^"\'\\\n]{4,}(?=\2)',
+     re.I, r'\g<1>' + REDACTED),
+    # Unquoted env-style assignments with upper-case names: DB_PASSWORD=x
+    (r'(\b[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN(?!S)|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)'
+     r'[A-Z0-9_]*[ \t]*=[ \t]*)(?![$\["\'\\])[^\s"\'\\]{4,}', 0, r'\g<1>' + REDACTED),
+    # YAML or .env style lines: password: x
+    (r'^([ \t]*(?:export[ \t]+)?[A-Za-z0-9_.-]*' + SECRET_NAME + r'[A-Za-z0-9_.-]*:[ \t]+)'
+     r'(?![$\["\'{<])[^\s(),;]{8,}(?=[ \t]*$)', re.I | re.M, r'\g<1>' + REDACTED),
+]]
+
+
+def redact(text):
+    for pattern, repl in SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
 
 sessions_dir, vault = sys.argv[1], sys.argv[2]
 hash_log = os.path.join(vault, '.sync-hashes')
@@ -334,7 +374,9 @@ def sync(path, hashes):
     front = '\n'.join(f'{k}: {json.dumps(v, ensure_ascii=False)}' for k, v in meta.items())
     if is_agent:
         front += f'\nparent_session: "{short}"'
-    write_atomic(os.path.join(vault, name), f'---\n{front}\n---\n\n' + '\n---\n\n'.join(sections))
+    # Redact each part separately so a cut-off key cannot swallow later sections.
+    note = f'---\n{redact(front)}\n---\n\n' + '\n---\n\n'.join(map(redact, sections))
+    write_atomic(os.path.join(vault, name), note)
 
     # Remove an older note for the same source under a different name.
     for old in glob.glob(os.path.join(glob.escape(vault), f'session-*-{suffix}.md')):
